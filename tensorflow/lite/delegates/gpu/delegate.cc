@@ -27,8 +27,10 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>  // NOLINT(build/c++11)
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -151,6 +153,37 @@ InferenceUsage ToUsage(int32_t usage) {
   return InferenceUsage::UNKNOWN;
 }
 
+// Parse comma-separated node indices from a string like "1,5,12"
+std::unordered_set<int> ParseForceFp32Nodes(const char* nodes_str) {
+  std::unordered_set<int> result;
+  if (!nodes_str || strlen(nodes_str) == 0) {
+    return result;
+  }
+  
+  std::string str(nodes_str);
+  std::stringstream ss(str);
+  std::string token;
+  
+  while (std::getline(ss, token, ',')) {
+    // Trim whitespace
+    token.erase(0, token.find_first_not_of(" \t"));
+    token.erase(token.find_last_not_of(" \t") + 1);
+    
+    if (!token.empty()) {
+      try {
+        int node_id = std::stoi(token);
+        if (node_id >= 0) {
+          result.insert(node_id);
+        }
+      } catch (const std::exception&) {
+        // Skip invalid entries
+      }
+    }
+  }
+  
+  return result;
+}
+
 // Forward declarations.
 TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate);
 
@@ -174,6 +207,10 @@ class Delegate {
     if (options_.max_delegated_partitions <= 0) {
       options_.max_delegated_partitions = 1;
     }
+    
+    // Parse force_fp32_nodes option
+    force_fp32_nodes_ = ParseForceFp32Nodes(options_.force_fp32_nodes);
+    
     if (options_.experimental_flags &
             TFLITE_GPU_EXPERIMENTAL_FLAGS_ENABLE_SERIALIZATION &&
         options_.model_token && options_.serialization_dir) {
@@ -202,11 +239,18 @@ class Delegate {
   TfLiteTelemetryGpuDelegateSettings* telemetry_settings() {
     return telemetry_settings_.get();
   }
+  
+  const std::unordered_set<int>& force_fp32_nodes() const {
+    return force_fp32_nodes_;
+  }
 
  private:
   TfLiteDelegate delegate_;
   TfLiteGpuDelegateOptionsV2 options_;
   std::atomic<int> num_delegate_kernels_ = 0;
+  
+  // Set of node IDs that should be forced to use FP32 precision
+  std::unordered_set<int> force_fp32_nodes_;
 
   std::unique_ptr<Serialization> serialization_;
 
@@ -460,6 +504,7 @@ absl::Status DelegateKernelCore::InitializeOpenClApi(
   // OpenCL initialization is parameterized by these InferenceOptions.
   auto delegate_options = delegate_->options();
   cl::InferenceOptions options;
+  options.force_fp32_nodes = delegate_->force_fp32_nodes();
   // If is_precision_loss_allowed == -1, then just use priorities instead
   // of paying attention to is_precision_loss_allowed value.
   if (delegate_options.is_precision_loss_allowed == -1) {
@@ -544,8 +589,27 @@ absl::Status DelegateKernelCore::MaybeInitializeSerializedOpenCL(
     Serialization* serialization) {
   if (!serialization) return absl::InvalidArgumentError("No serialization");
   // We use a fingerprint of the options to ensure compatibility.
+  // For force_fp32_nodes, we need to create a deterministic fingerprint
+  std::string force_fp32_str;
+  if (!options->force_fp32_nodes.empty()) {
+    std::vector<int> sorted_nodes(options->force_fp32_nodes.begin(), 
+                                  options->force_fp32_nodes.end());
+    std::sort(sorted_nodes.begin(), sorted_nodes.end());
+    for (size_t i = 0; i < sorted_nodes.size(); ++i) {
+      if (i > 0) force_fp32_str += ",";
+      force_fp32_str += std::to_string(sorted_nodes[i]);
+    }
+  }
+  
+  // Create a copy of options without force_fp32_nodes for hashing the base options
+  cl::InferenceOptions options_copy = *options;
+  options_copy.force_fp32_nodes.clear();
+  
   std::string options_fingerprint =
-      delegates::StrFingerprint(options, sizeof(cl::InferenceOptions));
+      delegates::StrFingerprint(&options_copy, sizeof(cl::InferenceOptions));
+  if (!force_fp32_str.empty()) {
+    options_fingerprint += "_fp32nodes_" + force_fp32_str;
+  }
   auto data_key = serialization->GetEntryForKernel(
       std::string(kSerializedDataPrefix) + options_fingerprint, context,
       delegate_params);
@@ -573,8 +637,27 @@ absl::Status DelegateKernelCore::SaveSerializedOpenCL(
     const std::vector<uint8_t>& serialized_model) {
   if (!serialization) return absl::InvalidArgumentError("No serialization");
   // We use a fingerprint of the options to ensure compatibility.
+  // For force_fp32_nodes, we need to create a deterministic fingerprint
+  std::string force_fp32_str;
+  if (!options->force_fp32_nodes.empty()) {
+    std::vector<int> sorted_nodes(options->force_fp32_nodes.begin(), 
+                                  options->force_fp32_nodes.end());
+    std::sort(sorted_nodes.begin(), sorted_nodes.end());
+    for (size_t i = 0; i < sorted_nodes.size(); ++i) {
+      if (i > 0) force_fp32_str += ",";
+      force_fp32_str += std::to_string(sorted_nodes[i]);
+    }
+  }
+  
+  // Create a copy of options without force_fp32_nodes for hashing the base options
+  cl::InferenceOptions options_copy = *options;
+  options_copy.force_fp32_nodes.clear();
+  
   std::string options_fingerprint =
-      delegates::StrFingerprint(options, sizeof(cl::InferenceOptions));
+      delegates::StrFingerprint(&options_copy, sizeof(cl::InferenceOptions));
+  if (!force_fp32_str.empty()) {
+    options_fingerprint += "_fp32nodes_" + force_fp32_str;
+  }
 
   // Save data.
   auto data_key = serialization->GetEntryForKernel(

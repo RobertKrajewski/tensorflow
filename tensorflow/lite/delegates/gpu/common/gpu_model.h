@@ -17,6 +17,7 @@ limitations under the License.
 #define TENSORFLOW_LITE_DELEGATES_GPU_COMMON_GPU_MODEL_H_
 
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -46,6 +47,10 @@ struct CreateGpuModelInfo {
   CalculationsPrecision precision;
   TensorStorageType storage_type;
   ModelHints hints;
+  
+  // Set of node IDs that should be forced to use FP32 precision even when
+  // precision loss is allowed globally. Empty set means no per-node overrides.
+  std::unordered_set<int> force_fp32_nodes;
 
   // User can require specific layout for some tensors.
   // This will guarantee that tensors with specific ids have exact specified

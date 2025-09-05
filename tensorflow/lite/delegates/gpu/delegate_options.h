@@ -137,6 +137,12 @@ typedef struct {
   // delegate will not try serialization.
   const char* model_token;
 
+  // Comma-separated list of node indices that should be forced to use FP32
+  // precision even when precision loss is allowed globally. For example: "1,5,12"
+  // Set to nullptr in TfLiteGpuDelegateOptionsV2Default(), which disables
+  // per-node precision override.
+  const char* force_fp32_nodes;
+
 #ifdef TFLITE_DEBUG_DELEGATE
   // This sets the index of the first node that could be delegated.
   int first_delegate_node_index;
@@ -153,6 +159,9 @@ typedef struct {
 //   priority3 = TFLITE_GPU_INFERENCE_PRIORITY_AUTO
 //   experimental_flags = TFLITE_GPU_EXPERIMENTAL_FLAGS_ENABLE_QUANT
 //   max_delegated_partitions = 1
+//   serialization_dir = nullptr
+//   model_token = nullptr
+//   force_fp32_nodes = nullptr
 TFL_CAPI_EXPORT TfLiteGpuDelegateOptionsV2 TfLiteGpuDelegateOptionsV2Default();
 
 #ifdef __cplusplus
