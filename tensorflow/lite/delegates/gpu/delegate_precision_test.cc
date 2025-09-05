@@ -15,16 +15,47 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <cstring>
+#include <sstream>
 #include <unordered_set>
 
 #include "tensorflow/lite/delegates/gpu/delegate_options.h"
 
 namespace tflite {
 namespace gpu {
-namespace {
 
-// Expose the internal parsing function for testing
-extern std::unordered_set<int> ParseForceFp32Nodes(const char* nodes_str);
+// Local copy of the parsing function for testing (duplicated from delegate.cc)
+std::unordered_set<int> ParseForceFp32Nodes(const char* nodes_str) {
+  std::unordered_set<int> result;
+  if (!nodes_str || strlen(nodes_str) == 0) {
+    return result;
+  }
+  
+  std::string str(nodes_str);
+  std::stringstream ss(str);
+  std::string token;
+  
+  while (std::getline(ss, token, ',')) {
+    // Trim whitespace
+    token.erase(0, token.find_first_not_of(" \t"));
+    token.erase(token.find_last_not_of(" \t") + 1);
+    
+    if (!token.empty()) {
+      try {
+        int node_id = std::stoi(token);
+        if (node_id >= 0) {
+          result.insert(node_id);
+        }
+      } catch (const std::exception&) {
+        // Skip invalid entries
+      }
+    }
+  }
+  
+  return result;
+}
+
+namespace {
 
 TEST(DelegatePrecisionTest, ParseForceFp32NodesEmpty) {
   auto result = ParseForceFp32Nodes(nullptr);

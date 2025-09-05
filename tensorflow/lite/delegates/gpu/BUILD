@@ -308,6 +308,27 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "delegate_precision_test",
+    srcs = ["delegate_precision_test.cc"],
+    deps = [
+        ":delegate_options",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "delegate_integration_test", 
+    srcs = ["delegate_integration_test.cc"],
+    deps = [
+        ":delegate_options",
+        "//tensorflow/lite/delegates/gpu/cl:api",
+        "//tensorflow/lite/delegates/gpu/common:gpu_model",
+        "//tensorflow/lite/delegates/gpu/common:precision",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "async_buffers",
     srcs = ["async_buffers.cc"],
