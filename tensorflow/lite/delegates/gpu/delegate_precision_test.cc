@@ -18,15 +18,22 @@ limitations under the License.
 #include <cstring>
 #include <sstream>
 #include <unordered_set>
+#include <vector>
 
 #include "tensorflow/lite/delegates/gpu/delegate_options.h"
 
 namespace tflite {
 namespace gpu {
 
+// Local copy of the ForceFp32NodesSpec structure for testing (duplicated from delegate.cc)
+struct ForceFp32NodesSpec {
+  std::unordered_set<int> indices;  // Directly specified node indices
+  std::vector<std::string> names;   // Operation names to be resolved later
+};
+
 // Local copy of the parsing function for testing (duplicated from delegate.cc)
-std::unordered_set<int> ParseForceFp32Nodes(const char* nodes_str) {
-  std::unordered_set<int> result;
+ForceFp32NodesSpec ParseForceFp32NodesSpec(const char* nodes_str) {
+  ForceFp32NodesSpec result;
   if (!nodes_str || strlen(nodes_str) == 0) {
     return result;
   }
@@ -44,15 +51,21 @@ std::unordered_set<int> ParseForceFp32Nodes(const char* nodes_str) {
       try {
         int node_id = std::stoi(token);
         if (node_id >= 0) {
-          result.insert(node_id);
+          result.indices.insert(node_id);
         }
       } catch (const std::exception&) {
-        // Skip invalid entries
+        // Not a number, treat as operation name
+        result.names.push_back(token);
       }
     }
   }
   
   return result;
+}
+
+// Backward compatibility function - extract only indices for legacy tests
+std::unordered_set<int> ParseForceFp32Nodes(const char* nodes_str) {
+  return ParseForceFp32NodesSpec(nodes_str).indices;
 }
 
 namespace {
@@ -107,6 +120,68 @@ TEST(DelegatePrecisionTest, ParseForceFp32NodesNegativeNumbers) {
 TEST(DelegatePrecisionTest, DefaultOptionsHaveNullForceFp32Nodes) {
   auto options = TfLiteGpuDelegateOptionsV2Default();
   EXPECT_EQ(options.force_fp32_nodes, nullptr);
+}
+
+// New tests for enhanced parsing with operation names
+TEST(DelegatePrecisionTest, ParseForceFp32NodesSpecEmpty) {
+  auto result = ParseForceFp32NodesSpec(nullptr);
+  EXPECT_TRUE(result.indices.empty());
+  EXPECT_TRUE(result.names.empty());
+  
+  result = ParseForceFp32NodesSpec("");
+  EXPECT_TRUE(result.indices.empty());
+  EXPECT_TRUE(result.names.empty());
+  
+  result = ParseForceFp32NodesSpec("   ");
+  EXPECT_TRUE(result.indices.empty());
+  EXPECT_TRUE(result.names.empty());
+}
+
+TEST(DelegatePrecisionTest, ParseForceFp32NodesSpecIndicesOnly) {
+  auto result = ParseForceFp32NodesSpec("1,5,12");
+  EXPECT_EQ(result.indices.size(), 3);
+  EXPECT_TRUE(result.indices.count(1));
+  EXPECT_TRUE(result.indices.count(5));
+  EXPECT_TRUE(result.indices.count(12));
+  EXPECT_TRUE(result.names.empty());
+}
+
+TEST(DelegatePrecisionTest, ParseForceFp32NodesSpecNamesOnly) {
+  auto result = ParseForceFp32NodesSpec("conv2d_1,batch_norm_2,add_3");
+  EXPECT_TRUE(result.indices.empty());
+  EXPECT_EQ(result.names.size(), 3);
+  EXPECT_EQ(result.names[0], "conv2d_1");
+  EXPECT_EQ(result.names[1], "batch_norm_2");
+  EXPECT_EQ(result.names[2], "add_3");
+}
+
+TEST(DelegatePrecisionTest, ParseForceFp32NodesSpecMixed) {
+  auto result = ParseForceFp32NodesSpec("1,conv2d_1,5,batch_norm_2");
+  EXPECT_EQ(result.indices.size(), 2);
+  EXPECT_TRUE(result.indices.count(1));
+  EXPECT_TRUE(result.indices.count(5));
+  EXPECT_EQ(result.names.size(), 2);
+  EXPECT_EQ(result.names[0], "conv2d_1");
+  EXPECT_EQ(result.names[1], "batch_norm_2");
+}
+
+TEST(DelegatePrecisionTest, ParseForceFp32NodesSpecWithSpaces) {
+  auto result = ParseForceFp32NodesSpec(" 1 , conv2d_1 , 5 , batch_norm_2 ");
+  EXPECT_EQ(result.indices.size(), 2);
+  EXPECT_TRUE(result.indices.count(1));
+  EXPECT_TRUE(result.indices.count(5));
+  EXPECT_EQ(result.names.size(), 2);
+  EXPECT_EQ(result.names[0], "conv2d_1");
+  EXPECT_EQ(result.names[1], "batch_norm_2");
+}
+
+TEST(DelegatePrecisionTest, ParseForceFp32NodesSpecNegativeNumbers) {
+  auto result = ParseForceFp32NodesSpec("1,-5,conv2d,12");
+  EXPECT_EQ(result.indices.size(), 2);  // -5 should be ignored
+  EXPECT_TRUE(result.indices.count(1));
+  EXPECT_TRUE(result.indices.count(12));
+  EXPECT_EQ(result.names.size(), 1);
+  EXPECT_EQ(result.names[0], "conv2d");
 }
 
 }  // namespace

@@ -72,6 +72,7 @@ limitations under the License.
 
 #include "tensorflow/lite/kernels/kernel_util.h"
 #include "tensorflow/lite/minimal_logging.h"
+#include "tensorflow/lite/util.h"
 #include "tensorflow/lite/profiling/telemetry/c/telemetry_setting_internal.h"
 #include "tensorflow/lite/profiling/telemetry/telemetry.h"
 #include "tensorflow/lite/profiling/telemetry/telemetry_status.h"
@@ -154,9 +155,15 @@ InferenceUsage ToUsage(int32_t usage) {
   return InferenceUsage::UNKNOWN;
 }
 
-// Parse comma-separated node indices from a string like "1,5,12"
-std::unordered_set<int> ParseForceFp32Nodes(const char* nodes_str) {
-  std::unordered_set<int> result;
+// Structure to hold parsed force_fp32_nodes specification
+struct ForceFp32NodesSpec {
+  std::unordered_set<int> indices;  // Directly specified node indices
+  std::vector<std::string> names;   // Operation names to be resolved later
+};
+
+// Parse comma-separated node indices and names from a string like "1,conv2d_1,5,batch_norm_2"
+ForceFp32NodesSpec ParseForceFp32NodesSpec(const char* nodes_str) {
+  ForceFp32NodesSpec result;
   if (!nodes_str || strlen(nodes_str) == 0) {
     return result;
   }
@@ -174,10 +181,47 @@ std::unordered_set<int> ParseForceFp32Nodes(const char* nodes_str) {
       try {
         int node_id = std::stoi(token);
         if (node_id >= 0) {
-          result.insert(node_id);
+          result.indices.insert(node_id);
         }
       } catch (const std::exception&) {
-        // Skip invalid entries
+        // Not a number, treat as operation name
+        result.names.push_back(token);
+      }
+    }
+  }
+  
+  return result;
+}
+
+// Resolve operation names to node indices using TensorFlow Lite context
+std::unordered_set<int> ResolveForceFp32Nodes(
+    const ForceFp32NodesSpec& spec, TfLiteContext* context) {
+  std::unordered_set<int> result = spec.indices;
+  
+  if (spec.names.empty()) {
+    return result;
+  }
+  
+  // Get execution plan to iterate through nodes
+  TfLiteIntArray* execution_plan;
+  if (context->GetExecutionPlan(context, &execution_plan) != kTfLiteOk) {
+    return result;  // Return what we have if execution plan is unavailable
+  }
+  
+  for (int i = 0; i < execution_plan->size; ++i) {
+    const int node_index = execution_plan->data[i];
+    TfLiteNode* node = nullptr;
+    TfLiteRegistration* registration = nullptr;
+    
+    if (context->GetNodeAndRegistration(context, node_index, &node, &registration) == kTfLiteOk) {
+      std::string op_name = GetOpNameByRegistration(*registration);
+      
+      // Check if this operation name matches any of the requested names
+      for (const std::string& requested_name : spec.names) {
+        if (op_name == requested_name) {
+          result.insert(node_index);
+          break;
+        }
       }
     }
   }
@@ -210,7 +254,7 @@ class Delegate {
     }
     
     // Parse force_fp32_nodes option
-    force_fp32_nodes_ = ParseForceFp32Nodes(options_.force_fp32_nodes);
+    force_fp32_nodes_spec_ = ParseForceFp32NodesSpec(options_.force_fp32_nodes);
     
     if (options_.experimental_flags &
             TFLITE_GPU_EXPERIMENTAL_FLAGS_ENABLE_SERIALIZATION &&
@@ -244,6 +288,11 @@ class Delegate {
   const std::unordered_set<int>& force_fp32_nodes() const {
     return force_fp32_nodes_;
   }
+  
+  // Resolve operation names to node indices using the TensorFlow Lite context
+  void ResolveForceFp32Names(TfLiteContext* context) {
+    force_fp32_nodes_ = ResolveForceFp32Nodes(force_fp32_nodes_spec_, context);
+  }
 
  private:
   TfLiteDelegate delegate_;
@@ -252,6 +301,9 @@ class Delegate {
   
   // Set of node IDs that should be forced to use FP32 precision
   std::unordered_set<int> force_fp32_nodes_;
+  
+  // Specification parsed from options, containing both indices and names
+  ForceFp32NodesSpec force_fp32_nodes_spec_;
 
   std::unique_ptr<Serialization> serialization_;
 
@@ -1429,6 +1481,9 @@ TfLiteRegistration CreateAsyncRegistration() {
 
 TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
   auto* gpu_delegate = GetDelegate(delegate);
+
+  // Resolve operation names to node indices now that we have the context
+  gpu_delegate->ResolveForceFp32Names(context);
 
   const TfLiteRegistration kRegistration =
 #if defined(__ANDROID__)

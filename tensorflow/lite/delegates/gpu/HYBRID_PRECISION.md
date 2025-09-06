@@ -27,8 +27,12 @@ TfLiteGpuDelegateOptionsV2 options = TfLiteGpuDelegateOptionsV2Default();
 // Enable precision loss globally (allows FP16)
 options.is_precision_loss_allowed = 1;
 
-// Force specific nodes to use FP32 (comma-separated node indices)
-options.force_fp32_nodes = "5,12,23";
+// Force specific nodes to use FP32 (comma-separated node indices or operation names)
+options.force_fp32_nodes = "5,12,23";  // By node index
+// OR
+options.force_fp32_nodes = "CONV_2D,ADD";  // By operation name  
+// OR  
+options.force_fp32_nodes = "5,CONV_2D,12,ADD";  // Mixed format
 
 // Create and use the delegate
 auto* delegate = TfLiteGpuDelegateV2Create(&options);
@@ -36,29 +40,85 @@ auto* delegate = TfLiteGpuDelegateV2Create(&options);
 TfLiteGpuDelegateV2Delete(delegate);
 ```
 
-### Node Index Identification
+### Node Specification
 
-Node indices correspond to the execution order in your TensorFlow Lite model. You can identify them by:
+You can specify nodes to force to FP32 in three ways:
 
-1. **Model visualization**: Use tools like Netron to visualize your model
+#### 1. By Node Index
+Node indices correspond to the execution order in your TensorFlow Lite model:
+```cpp
+options.force_fp32_nodes = "5,12,23";  // Force nodes at indices 5, 12, and 23
+```
+
+#### 2. By Operation Name  
+Specify operations by their TensorFlow Lite operation name:
+```cpp
+options.force_fp32_nodes = "CONV_2D,ADD";  // Force all CONV_2D and ADD operations
+```
+
+#### 3. Mixed Format
+Combine both approaches:
+```cpp
+options.force_fp32_nodes = "5,CONV_2D,12,ADD";  // Mixed indices and operation names
+```
+
+### Identifying Nodes
+
+**By Index**: You can identify node indices by:
+1. **Model visualization**: Use tools like Netron to visualize your model  
 2. **TensorFlow Lite analysis**: Use debugging tools to trace execution
 3. **Empirical testing**: Run with different precision settings and measure accuracy
+
+**By Operation Name**: Common TensorFlow Lite operation names include:
+- `CONV_2D` - 2D convolution operations
+- `DEPTHWISE_CONV_2D` - Depthwise convolution operations  
+- `FULLY_CONNECTED` - Dense/linear layers
+- `ADD`, `MUL`, `SUB` - Element-wise arithmetic operations
+- `AVERAGE_POOL_2D`, `MAX_POOL_2D` - Pooling operations
+- `BATCH_NORMALIZATION` - Batch normalization layers
+- `RELU`, `RELU6`, `LOGISTIC` - Activation functions
+
+**Advantages of Each Approach**:
+- **Index-based**: Precise control over specific operation instances
+- **Name-based**: Easy to target all operations of a certain type
+- **Mixed**: Best of both worlds for complex targeting strategies
 
 ### Common Use Cases
 
 **Classification models**: Force the final layers to FP32
 ```cpp
+// By index (precise control)
 options.force_fp32_nodes = "45,46,47";  // Final dense + softmax layers
+
+// By operation type (applies to all instances)
+options.force_fp32_nodes = "FULLY_CONNECTED,SOFTMAX";
+
+// Mixed approach 
+options.force_fp32_nodes = "45,SOFTMAX";  // Specific dense layer + all softmax
 ```
 
 **Object detection**: Force critical detection layers to FP32
 ```cpp
-options.force_fp32_nodes = "12,25,38";  // Key detection heads
+// By index for specific detection heads
+options.force_fp32_nodes = "12,25,38";  
+
+// By operation type for all convolutions in detection heads
+options.force_fp32_nodes = "CONV_2D";
+
+// Target specific arithmetic operations that affect bounding boxes
+options.force_fp32_nodes = "ADD,MUL";  // Box coordinate calculations
 ```
 
 **Batch normalization**: Force precision-sensitive normalization
 ```cpp
-options.force_fp32_nodes = "8,15,22,29";  // Batch norm layers
+// By index for specific batch norm layers
+options.force_fp32_nodes = "8,15,22,29";  
+
+// By operation type for all batch normalization layers
+options.force_fp32_nodes = "BATCH_NORMALIZATION";
+
+// Target batch norm in specific parts of the network
+options.force_fp32_nodes = "45,BATCH_NORMALIZATION,FULLY_CONNECTED";
 ```
 
 ## Technical Details
@@ -66,10 +126,11 @@ options.force_fp32_nodes = "8,15,22,29";  // Batch norm layers
 ### Implementation
 
 The feature works by:
-1. Parsing the `force_fp32_nodes` string into a set of node IDs
-2. Propagating this information through the OpenCL compilation pipeline
-3. Overriding the `OperationDef.precision` field for specified nodes during model building
-4. Ensuring proper cache invalidation for serialized models
+1. Parsing the `force_fp32_nodes` string into node indices and operation names
+2. During delegate preparation, resolving operation names to specific node indices using the TensorFlow Lite context
+3. Propagating this information through the OpenCL compilation pipeline  
+4. Overriding the `OperationDef.precision` field for specified nodes during model building
+5. Ensuring proper cache invalidation for serialized models
 
 ### Performance Considerations
 

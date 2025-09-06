@@ -263,6 +263,7 @@ cc_library(
         ":tflite_profile",
         "//tensorflow/lite:kernel_api",
         "//tensorflow/lite:minimal_logging",
+        "//tensorflow/lite:util",
         "//tensorflow/lite/async:backend_async_kernel_interface",
         "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/delegates:serialization",
