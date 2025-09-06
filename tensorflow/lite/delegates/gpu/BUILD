@@ -263,6 +263,7 @@ cc_library(
         ":tflite_profile",
         "//tensorflow/lite:kernel_api",
         "//tensorflow/lite:minimal_logging",
+        "//tensorflow/lite:util",
         "//tensorflow/lite/async:backend_async_kernel_interface",
         "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/delegates:serialization",
@@ -304,6 +305,27 @@ cc_test(
     srcs = ["android_hardware_buffer_test.cc"],
     deps = [
         ":android_hardware_buffer",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "delegate_precision_test",
+    srcs = ["delegate_precision_test.cc"],
+    deps = [
+        ":delegate_options",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "delegate_integration_test", 
+    srcs = ["delegate_integration_test.cc"],
+    deps = [
+        ":delegate_options",
+        "//tensorflow/lite/delegates/gpu/cl:api",
+        "//tensorflow/lite/delegates/gpu/common:gpu_model",
+        "//tensorflow/lite/delegates/gpu/common:precision",
         "@com_google_googletest//:gtest_main",
     ],
 )

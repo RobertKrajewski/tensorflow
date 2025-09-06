@@ -26,9 +26,12 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>  // NOLINT(build/c++11)
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -69,6 +72,7 @@ limitations under the License.
 
 #include "tensorflow/lite/kernels/kernel_util.h"
 #include "tensorflow/lite/minimal_logging.h"
+#include "tensorflow/lite/util.h"
 #include "tensorflow/lite/profiling/telemetry/c/telemetry_setting_internal.h"
 #include "tensorflow/lite/profiling/telemetry/telemetry.h"
 #include "tensorflow/lite/profiling/telemetry/telemetry_status.h"
@@ -151,6 +155,80 @@ InferenceUsage ToUsage(int32_t usage) {
   return InferenceUsage::UNKNOWN;
 }
 
+// Structure to hold parsed force_fp32_nodes specification
+struct ForceFp32NodesSpec {
+  std::unordered_set<int> indices;  // Directly specified node indices
+  std::vector<std::string> names;   // Operation names to be resolved later
+};
+
+// Parse comma-separated node indices and names from a string like "1,conv2d_1,5,batch_norm_2"
+ForceFp32NodesSpec ParseForceFp32NodesSpec(const char* nodes_str) {
+  ForceFp32NodesSpec result;
+  if (!nodes_str || strlen(nodes_str) == 0) {
+    return result;
+  }
+  
+  std::string str(nodes_str);
+  std::stringstream ss(str);
+  std::string token;
+  
+  while (std::getline(ss, token, ',')) {
+    // Trim whitespace
+    token.erase(0, token.find_first_not_of(" \t"));
+    token.erase(token.find_last_not_of(" \t") + 1);
+    
+    if (!token.empty()) {
+      try {
+        int node_id = std::stoi(token);
+        if (node_id >= 0) {
+          result.indices.insert(node_id);
+        }
+      } catch (const std::exception&) {
+        // Not a number, treat as operation name
+        result.names.push_back(token);
+      }
+    }
+  }
+  
+  return result;
+}
+
+// Resolve operation names to node indices using TensorFlow Lite context
+std::unordered_set<int> ResolveForceFp32Nodes(
+    const ForceFp32NodesSpec& spec, TfLiteContext* context) {
+  std::unordered_set<int> result = spec.indices;
+  
+  if (spec.names.empty()) {
+    return result;
+  }
+  
+  // Get execution plan to iterate through nodes
+  TfLiteIntArray* execution_plan;
+  if (context->GetExecutionPlan(context, &execution_plan) != kTfLiteOk) {
+    return result;  // Return what we have if execution plan is unavailable
+  }
+  
+  for (int i = 0; i < execution_plan->size; ++i) {
+    const int node_index = execution_plan->data[i];
+    TfLiteNode* node = nullptr;
+    TfLiteRegistration* registration = nullptr;
+    
+    if (context->GetNodeAndRegistration(context, node_index, &node, &registration) == kTfLiteOk) {
+      std::string op_name = GetOpNameByRegistration(*registration);
+      
+      // Check if this operation name matches any of the requested names
+      for (const std::string& requested_name : spec.names) {
+        if (op_name == requested_name) {
+          result.insert(node_index);
+          break;
+        }
+      }
+    }
+  }
+  
+  return result;
+}
+
 // Forward declarations.
 TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate);
 
@@ -174,6 +252,10 @@ class Delegate {
     if (options_.max_delegated_partitions <= 0) {
       options_.max_delegated_partitions = 1;
     }
+    
+    // Parse force_fp32_nodes option
+    force_fp32_nodes_spec_ = ParseForceFp32NodesSpec(options_.force_fp32_nodes);
+    
     if (options_.experimental_flags &
             TFLITE_GPU_EXPERIMENTAL_FLAGS_ENABLE_SERIALIZATION &&
         options_.model_token && options_.serialization_dir) {
@@ -202,11 +284,26 @@ class Delegate {
   TfLiteTelemetryGpuDelegateSettings* telemetry_settings() {
     return telemetry_settings_.get();
   }
+  
+  const std::unordered_set<int>& force_fp32_nodes() const {
+    return force_fp32_nodes_;
+  }
+  
+  // Resolve operation names to node indices using the TensorFlow Lite context
+  void ResolveForceFp32Names(TfLiteContext* context) {
+    force_fp32_nodes_ = ResolveForceFp32Nodes(force_fp32_nodes_spec_, context);
+  }
 
  private:
   TfLiteDelegate delegate_;
   TfLiteGpuDelegateOptionsV2 options_;
   std::atomic<int> num_delegate_kernels_ = 0;
+  
+  // Set of node IDs that should be forced to use FP32 precision
+  std::unordered_set<int> force_fp32_nodes_;
+  
+  // Specification parsed from options, containing both indices and names
+  ForceFp32NodesSpec force_fp32_nodes_spec_;
 
   std::unique_ptr<Serialization> serialization_;
 
@@ -460,6 +557,7 @@ absl::Status DelegateKernelCore::InitializeOpenClApi(
   // OpenCL initialization is parameterized by these InferenceOptions.
   auto delegate_options = delegate_->options();
   cl::InferenceOptions options;
+  options.force_fp32_nodes = delegate_->force_fp32_nodes();
   // If is_precision_loss_allowed == -1, then just use priorities instead
   // of paying attention to is_precision_loss_allowed value.
   if (delegate_options.is_precision_loss_allowed == -1) {
@@ -544,8 +642,27 @@ absl::Status DelegateKernelCore::MaybeInitializeSerializedOpenCL(
     Serialization* serialization) {
   if (!serialization) return absl::InvalidArgumentError("No serialization");
   // We use a fingerprint of the options to ensure compatibility.
+  // For force_fp32_nodes, we need to create a deterministic fingerprint
+  std::string force_fp32_str;
+  if (!options->force_fp32_nodes.empty()) {
+    std::vector<int> sorted_nodes(options->force_fp32_nodes.begin(), 
+                                  options->force_fp32_nodes.end());
+    std::sort(sorted_nodes.begin(), sorted_nodes.end());
+    for (size_t i = 0; i < sorted_nodes.size(); ++i) {
+      if (i > 0) force_fp32_str += ",";
+      force_fp32_str += std::to_string(sorted_nodes[i]);
+    }
+  }
+  
+  // Create a copy of options without force_fp32_nodes for hashing the base options
+  cl::InferenceOptions options_copy = *options;
+  options_copy.force_fp32_nodes.clear();
+  
   std::string options_fingerprint =
-      delegates::StrFingerprint(options, sizeof(cl::InferenceOptions));
+      delegates::StrFingerprint(&options_copy, sizeof(cl::InferenceOptions));
+  if (!force_fp32_str.empty()) {
+    options_fingerprint += "_fp32nodes_" + force_fp32_str;
+  }
   auto data_key = serialization->GetEntryForKernel(
       std::string(kSerializedDataPrefix) + options_fingerprint, context,
       delegate_params);
@@ -573,8 +690,27 @@ absl::Status DelegateKernelCore::SaveSerializedOpenCL(
     const std::vector<uint8_t>& serialized_model) {
   if (!serialization) return absl::InvalidArgumentError("No serialization");
   // We use a fingerprint of the options to ensure compatibility.
+  // For force_fp32_nodes, we need to create a deterministic fingerprint
+  std::string force_fp32_str;
+  if (!options->force_fp32_nodes.empty()) {
+    std::vector<int> sorted_nodes(options->force_fp32_nodes.begin(), 
+                                  options->force_fp32_nodes.end());
+    std::sort(sorted_nodes.begin(), sorted_nodes.end());
+    for (size_t i = 0; i < sorted_nodes.size(); ++i) {
+      if (i > 0) force_fp32_str += ",";
+      force_fp32_str += std::to_string(sorted_nodes[i]);
+    }
+  }
+  
+  // Create a copy of options without force_fp32_nodes for hashing the base options
+  cl::InferenceOptions options_copy = *options;
+  options_copy.force_fp32_nodes.clear();
+  
   std::string options_fingerprint =
-      delegates::StrFingerprint(options, sizeof(cl::InferenceOptions));
+      delegates::StrFingerprint(&options_copy, sizeof(cl::InferenceOptions));
+  if (!force_fp32_str.empty()) {
+    options_fingerprint += "_fp32nodes_" + force_fp32_str;
+  }
 
   // Save data.
   auto data_key = serialization->GetEntryForKernel(
@@ -1345,6 +1481,9 @@ TfLiteRegistration CreateAsyncRegistration() {
 
 TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
   auto* gpu_delegate = GetDelegate(delegate);
+
+  // Resolve operation names to node indices now that we have the context
+  gpu_delegate->ResolveForceFp32Names(context);
 
   const TfLiteRegistration kRegistration =
 #if defined(__ANDROID__)

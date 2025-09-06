@@ -328,7 +328,12 @@ absl::Status ConvertOperations(const GpuInfo& gpu_info,
       }
       consumed_nodes.insert(node.id);
       OperationDef op_def;
-      op_def.precision = create_info.precision;
+      // Check if this node should be forced to FP32 precision
+      if (create_info.force_fp32_nodes.count(node.id)) {
+        op_def.precision = CalculationsPrecision::F32;
+      } else {
+        op_def.precision = create_info.precision;
+      }
       for (int j = 0; j < inputs.size(); ++j) {
         op_def.src_tensors.push_back(tensor_reserver->Get(inputs[j]->id));
       }

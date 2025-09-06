@@ -30,6 +30,7 @@ TfLiteGpuDelegateOptionsV2 TfLiteGpuDelegateOptionsV2Default() {
   options.max_delegated_partitions = 1;
   options.model_token = nullptr;
   options.serialization_dir = nullptr;
+  options.force_fp32_nodes = nullptr;
 #ifdef TFLITE_DEBUG_DELEGATE
   options.first_delegate_node_index = 0;
   options.last_delegate_node_index = std::numeric_limits<int>::max();

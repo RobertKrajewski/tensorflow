@@ -24,6 +24,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <unordered_set>
 
 #include "absl/types/span.h"
 #include "tensorflow/lite/delegates/gpu/api.h"
@@ -53,7 +54,11 @@ namespace tflite {
 namespace gpu {
 namespace cl {
 
-struct InferenceOptions : public tflite::gpu::InferenceOptions {};
+struct InferenceOptions : public tflite::gpu::InferenceOptions {
+  // Set of node IDs that should be forced to use FP32 precision even when
+  // precision loss is allowed globally. Empty set means no per-node overrides.
+  std::unordered_set<int> force_fp32_nodes;
+};
 
 // Indicates environment
 struct InferenceEnvironmentProperties {

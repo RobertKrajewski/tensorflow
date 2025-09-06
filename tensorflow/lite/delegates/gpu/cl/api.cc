@@ -673,6 +673,7 @@ CreateGpuModelInfo GetCreateInfo(const Environment& environment,
   CreateGpuModelInfo create_info;
   create_info.precision = GetPrecision(environment, options);
   create_info.storage_type = GetStorageTypeFromOptions(environment, options);
+  create_info.force_fp32_nodes = options.force_fp32_nodes;
   if (options.usage == InferenceUsage::FAST_SINGLE_ANSWER) {
     create_info.hints.Add(ModelHints::kReduceKernelsCount);
     create_info.hints.Add(ModelHints::kFastTuning);
